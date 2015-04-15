@@ -362,8 +362,9 @@ def _get_install_agent_pkgs_cmd(agent_packages,
     download_agents_cmd = ''
     install_agents_cmd = ''
     for agent_name, agent_url in agent_packages.items():
-        download_agents_cmd += 'curl -O {0}{1} ' \
-                               .format(agent_url, ' && ')
+        download_agents_cmd += ('curl --connect-timeout 3 '
+                                '--retry 3 -g -O "{0}" {1} ').format(agent_url,
+                                                                     '&&')
 
     install_agents_cmd += 'rm -rf {0}/* && dpkg -i {1}/*.deb' \
                           .format(agents_dest_dir,
