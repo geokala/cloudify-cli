@@ -176,13 +176,24 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
 
     def post_bootstrap_actions(wait_for_services_timeout=180):
         lgr.info('waiting for cloudify management services to start')
-        started = _wait_for_management(manager_ip,
-                                       timeout=wait_for_services_timeout)
+        manager_ipv6_address = get_container_ipv6_address()
+
+        if manager_ipv6_address is not None:
+            started = _wait_for_management(manager_ipv6_address,
+                                           timeout=wait_for_services_timeout)
+        if not started:
+            # If the attempt on the IPv6 address failed, we don't want to use
+            # it for the context
+            manager_ipv6_address = None
+            started = _wait_for_management(manager_ip,
+                                           timeout=wait_for_services_timeout)
+
         if not started:
             err = 'failed waiting for cloudify management services to start.'
             lgr.info(err)
             raise NonRecoverableError(err)
-        _set_manager_endpoint_data()
+        _set_manager_endpoint_data(manager_ip=manager_ipv6_address
+                                   or manager_ip)
         ctx.instance.runtime_properties['containers_started'] = 'True'
         try:
             _upload_provider_context(agent_remote_key_path, provider_context)
@@ -462,9 +473,9 @@ def _wait_for_management(ip, timeout, port=REST_PORT):
     return False
 
 
-def _set_manager_endpoint_data():
+def _set_manager_endpoint_data(manager_ip):
     ctx.instance.runtime_properties[MANAGER_IP_RUNTIME_PROPERTY] = \
-        fabric.api.env.host_string
+        manager_ip
     ctx.instance.runtime_properties[MANAGER_USER_RUNTIME_PROPERTY] = \
         fabric.api.env.user
     ctx.instance.runtime_properties[MANAGER_KEY_PATH_RUNTIME_PROPERTY] = \
@@ -525,6 +536,18 @@ def _update_manager_deployment(local_only=False):
         rest_client = utils.get_rest_client()
         rest_client.manager.update_context('provider', provider_context)
 
+def get_container_ipv6_address():
+    # Should get sudo setting, but working in same fashion as
+    # _upload_provider_context at the moment and assuming it
+    container_details = json.loads(_run_command('sudo docker inspect cfy'))
+    container_networking = container_details[0]['NetworkSettings']
+
+    ipv6 = None
+
+    if 'GlobalIPv6Address' in container_networking.keys():
+        ipv6 = container_networking['GlobalIPv6Address']
+
+    return ipv6
 
 def _upload_provider_context(remote_agents_private_key_path,
                              provider_context=None):
@@ -556,10 +579,16 @@ def _upload_provider_context(remote_agents_private_key_path,
     fabric.api.put(provider_context_json_file,
                    remote_provider_context_file)
 
+    manager_ip = ctx.instance.runtime_properties[MANAGER_IP_RUNTIME_PROPERTY]
+
+    if ':' in manager_ip:
+        manager_ip = '[{ip}]'.format(ip=manager_ip)
+
     upload_provider_context_cmd = \
-        'curl --fail -XPOST localhost:8101/provider/context -H ' \
-        '"Content-Type: application/json" -d @{0}'.format(
-            container_provider_context_file)
+        'curl -g --fail -XPOST \'{ip}\':8101/provider/context -H ' \
+        '"Content-Type: application/json" -d @{context}'.format(
+            ip=manager_ip,
+            context=container_provider_context_file)
 
     # uploading the provider context to the REST service
     _run_command_in_cfy(upload_provider_context_cmd, terminal=True)
