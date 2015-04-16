@@ -236,6 +236,12 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
     security_config = cloudify_config.get('security', {})
     security_config_path = _handle_security_configuration(security_config)
 
+    manager_ip = ctx.instance.runtime_properties[MANAGER_IP_RUNTIME_PROPERTY]
+    if ':' in manager_ip:
+        # If this is an IPv6 IP, it needs to be enclosed in square brackets to
+        # work with celery
+        manager_ip = '[{ip}]'.format(ip=manager_ip)
+
     cfy_management_options = ('-t '
                               '--volumes-from data '
                               '--privileged={0} '
@@ -254,8 +260,7 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
                               'cloudify '
                               '/sbin/my_init'
                               .format(privileged,
-                                      manager_private_ip or
-                                      ctx.instance.host_ip,
+                                      manager_ip,
                                       security_config_path))
 
     agent_packages = cloudify_packages.get('agents')
