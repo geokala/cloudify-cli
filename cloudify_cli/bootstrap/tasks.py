@@ -373,6 +373,9 @@ def _get_install_agent_pkgs_cmd(agent_packages,
     download_agents_cmd = ''
     install_agents_cmd = ''
     for agent_name, agent_url in agent_packages.items():
+        # Connect timeout and retry handle IPv6 in docker and temporary issues
+        # with networks. '-g' disables globbing, which is required when IPv6
+        # addresses are supplied.
         download_agents_cmd += ('curl --connect-timeout 3 '
                                 '--retry 3 -g -O "{0}" {1} ').format(agent_url,
                                                                      '&&')
