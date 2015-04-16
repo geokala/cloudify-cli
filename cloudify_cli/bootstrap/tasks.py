@@ -192,8 +192,13 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
             err = 'failed waiting for cloudify management services to start.'
             lgr.info(err)
             raise NonRecoverableError(err)
-        _set_manager_endpoint_data(manager_ip=manager_ipv6_address
-                                   or manager_ip)
+        manager_ip = manager_ipv6_address or manager_ip
+        if ':' in manager_ip:
+            # If this is an IPv6 IP, it needs to be enclosed in square
+            # brackets to work with celery
+            manager_ip = '[{ip}]'.format(ip=manager_ip)
+
+        _set_manager_endpoint_data(manager_ip)
         ctx.instance.runtime_properties['containers_started'] = 'True'
         try:
             _upload_provider_context(agent_remote_key_path, provider_context)
@@ -236,12 +241,6 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
     security_config = cloudify_config.get('security', {})
     security_config_path = _handle_security_configuration(security_config)
 
-    manager_ip = ctx.instance.runtime_properties[MANAGER_IP_RUNTIME_PROPERTY]
-    if ':' in manager_ip:
-        # If this is an IPv6 IP, it needs to be enclosed in square brackets to
-        # work with celery
-        manager_ip = '[{ip}]'.format(ip=manager_ip)
-
     cfy_management_options = ('-t '
                               '--volumes-from data '
                               '--privileged={0} '
@@ -260,6 +259,7 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
                               'cloudify '
                               '/sbin/my_init'
                               .format(privileged,
+                                      manager_private_ip or
                                       manager_ip,
                                       security_config_path))
 
@@ -588,9 +588,6 @@ def _upload_provider_context(remote_agents_private_key_path,
                    remote_provider_context_file)
 
     manager_ip = ctx.instance.runtime_properties[MANAGER_IP_RUNTIME_PROPERTY]
-
-    if ':' in manager_ip:
-        manager_ip = '[{ip}]'.format(ip=manager_ip)
 
     upload_provider_context_cmd = \
         'curl -g --fail -XPOST \'{ip}\':8101/provider/context -H ' \
