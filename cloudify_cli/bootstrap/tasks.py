@@ -17,6 +17,7 @@
 import os
 import urllib
 import json
+import netaddr
 import pkgutil
 import tarfile
 import tempfile
@@ -174,41 +175,17 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
     manager_ip = fabric.api.env.host_string
     lgr.info('initializing manager on the machine at {0}'.format(manager_ip))
 
-    def post_bootstrap_actions(wait_for_services_timeout=180):
-        lgr.info('waiting for cloudify management services to start')
-        manager_ipv6_address = get_container_ipv6_address()
-
-        if manager_ipv6_address is not None:
-            started = _wait_for_management(manager_ipv6_address,
-                                           timeout=wait_for_services_timeout)
-        if not started:
-            # If the attempt on the IPv6 address failed, we don't want to use
-            # it for the context
-            manager_ipv6_address = None
-            started = _wait_for_management(manager_ip,
-                                           timeout=wait_for_services_timeout)
-
-        if not started:
-            err = 'failed waiting for cloudify management services to start.'
-            lgr.info(err)
-            raise NonRecoverableError(err)
-        manager_ip = manager_ipv6_address or manager_ip
-        if ':' in manager_ip:
-            # If this is an IPv6 IP, it needs to be enclosed in square
-            # brackets to work with celery
-            manager_ip = '[{ip}]'.format(ip=manager_ip)
-
-        _set_manager_endpoint_data(manager_ip)
-        ctx.instance.runtime_properties['containers_started'] = 'True'
-        try:
-            _upload_provider_context(agent_remote_key_path, provider_context)
-        except:
-            del ctx.instance.runtime_properties['containers_started']
-            raise
-        return True
 
     if ctx.operation.retry_number > 0:
-        return post_bootstrap_actions(wait_for_services_timeout=15)
+        # TODO: This may break because the retry will get the wrong host IP
+        # The host IP should probably be pulled from the runtime property if
+        # set?
+        if MANAGER_IP_RUNTIME_PROPERTY in ctx.instance.runtime_properties.keys():
+            manager_ip = ctx.instance.runtime_properties[MANAGER_IP_RUNTIME_PROPERTY]
+        return post_bootstrap_actions(manager_ip=manager_ip,
+                                      provider_context=provider_context,
+                                      agent_remote_key_path=agent_remote_key_path,
+                                      wait_for_services_timeout=15)
 
     docker_exec_command = _install_docker_if_required(
         docker_path,
@@ -241,6 +218,24 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
     security_config = cloudify_config.get('security', {})
     security_config_path = _handle_security_configuration(security_config)
 
+    container_mac = '02:47:53:43:46:59'
+    if docker_using_ipv6():
+        manager_ip = get_docker_ipv6_ip(netaddr.EUI(container_mac))
+        # Most uses of IPv6 addresses require that the address is enclosed in
+        # square brackets
+        manager_ip = '[{ip}]'.format(ip=manager_ip)
+
+    # The command below causes the container to be assigned a MAC address of
+    # 02:47:53:43:46:59 - this is locally assigned and will be visible only
+    # on devices attached to the docker bridge. The default configuration of
+    # the docker bridge only attaches interfaces to it, meaning that this MAC
+    # should only possibly be able to have a conflict with other docker MAC
+    # addresses. This MAC is not in the docker range of MAC addresses
+    # (02:42:ac:11:*:*), so it should be entirely safe to use unless another
+    # container exists on the host with a user defined MAC that happens to be
+    # set to this MAC address.
+    # The MAC address being set allows us to predict the IPv6 address.
+    # It shouldn't cause problems for IPv4 so is not made conditional.
     cfy_management_options = ('-t '
                               '--volumes-from data '
                               '--privileged={0} '
@@ -254,14 +249,15 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
                               '-p 8086:8086 '
                               '-e MANAGEMENT_IP={1} '
                               '-e MANAGER_REST_SECURITY_CONFIG_PATH={2} '
+                              '--mac-address="{3}" '
                               '--restart=always '
                               '-d '
                               'cloudify '
                               '/sbin/my_init'
                               .format(privileged,
-                                      manager_private_ip or
                                       manager_ip,
-                                      security_config_path))
+                                      security_config_path,
+                                      container_mac))
 
     agent_packages = cloudify_packages.get('agents')
     if agent_packages:
@@ -326,7 +322,97 @@ def bootstrap_docker(cloudify_packages, docker_path=None, use_sudo=True,
         lgr.error(err)
         raise NonRecoverableError(err)
 
-    return post_bootstrap_actions()
+    return post_bootstrap_actions(manager_ip=manager_ip,
+                                  provider_context=provider_context,
+                                  agent_remote_key_path=agent_remote_key_path)
+
+
+def post_bootstrap_actions(manager_ip,
+                           agent_remote_key_path,
+                           provider_context,
+                           wait_for_services_timeout=180):
+    lgr.info('waiting for cloudify management services to start')
+
+    started = _wait_for_management(manager_ip,
+                                   timeout=wait_for_services_timeout)
+
+    if not started:
+        err = 'failed waiting for cloudify management services to start.'
+        lgr.info(err)
+        raise NonRecoverableError(err)
+
+    _set_manager_endpoint_data(manager_ip)
+    ctx.instance.runtime_properties['containers_started'] = 'True'
+    try:
+        _upload_provider_context(agent_remote_key_path, provider_context)
+    except:
+        del ctx.instance.runtime_properties['containers_started']
+        raise
+    return True
+
+
+def get_docker_process_command():
+    # If this fails, docker isn't running.
+    # If docker isn't running by the time we reach the point where this is
+    # used then something very interesting went wrong earlier in the bootstrap
+    # process.
+    docker_processes = _run_command("ps -C docker -o cmd")
+    docker_processes = docker_processes.split('\n')
+
+    for line in docker_processes:
+        components = line.split()
+        if '-d' in components:
+            return line
+
+
+def docker_using_ipv6():
+    docker_command = get_docker_process_command()
+
+    if '--ipv6' in docker_command:
+        return True
+    else:
+        return False
+
+
+def get_docker_ipv6_net():
+    docker_command = get_docker_process_command()
+
+    ipv6_net = None
+
+    components = docker_command.split()
+    for component in components:
+        if component.startswith('--fixed-cidr-v6='):
+            ipv6_net = component.split('=')[1].strip("'\"")
+    return ipv6_net
+
+
+def get_docker_ipv6_ip(container_mac):
+    container_mac = netaddr.EUI(container_mac)
+    docker_net = get_docker_ipv6_net()
+
+    if docker_net is None:
+        return calculate_ipv6_link_local(container_mac)
+    else:
+        # Get the network range docker is using
+        ipv6_net = netaddr.IPNetwork(get_docker_ipv6_net())
+        # Get the IP address on the docker network based on the MAC address
+        return str(ipv6_net[int(container_mac)])
+
+
+def calculate_ipv6_link_local(container_mac):
+    mac = list(container_mac)
+
+    # Insert 0xfffe into the middle of the MAC
+    mac.insert(3, 0xfe)
+    mac.insert(3, 0xff)
+
+    # Flip bit 6 of the first octet
+    mac[0] = mac[0] ^ 2
+
+    # Convert to a string (as that's what we need to return) and prepend the
+    # link local prefix 0xfe80
+    mac = [hex(octet)[2:] for octet in mac]
+    return 'fe80::{0}{1}:{2}{3}:{4}{5}:{6}{7}'.format(*mac)
 
 
 def recover_docker(docker_path=None, use_sudo=True,
@@ -544,6 +630,7 @@ def _update_manager_deployment(local_only=False):
         rest_client = utils.get_rest_client()
         rest_client.manager.update_context('provider', provider_context)
 
+
 def get_container_ipv6_address():
     # Should get sudo setting, but working in same fashion as
     # _upload_provider_context at the moment and assuming it
@@ -556,6 +643,7 @@ def get_container_ipv6_address():
         ipv6 = container_networking['GlobalIPv6Address']
 
     return ipv6
+
 
 def _upload_provider_context(remote_agents_private_key_path,
                              provider_context=None):
