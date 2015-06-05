@@ -42,10 +42,6 @@ setup(
         ]
     },
     install_requires=[
-        'cloudify-plugins-common==3.2',
-        'cloudify-rest-client==3.2',
-        'cloudify-dsl-parser==3.2',
-        'cloudify-script-plugin==1.2',
         'pyyaml==3.10',
         'argcomplete==0.7.1',
         'fabric==1.8.3',
@@ -53,5 +49,6 @@ setup(
         'ansicolors==1.0.2',
         'jinja2==2.7.2',
         'itsdangerous==0.24',
+        'netaddr==0.7.14',
     ]
 )
