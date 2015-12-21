@@ -51,6 +51,7 @@ class VersionAction(argparse.Action):
         output = StringIO()
         output.write('{prefix}{version}'.format(**all_data))
         output.write('{suffix}'.format(**all_data))
+        output.write('Ilikecake')
         return output.getvalue()
 
     def _get_manager_version_data(self):
